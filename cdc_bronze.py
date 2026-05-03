@@ -1,16 +1,21 @@
-from pyspark.sql import SparkSession
+"""
+Bronze: Debezium topic -> Iceberg (REST catalog).
+
+This notebook image is Spark 3.5.0 + Scala 2.12. PYSPARK_SUBMIT_ARGS must use the
+_2.12 Kafka and Iceberg runtime artifacts; _2.13 jars trigger
+NoClassDefFoundError: scala/$less$colon$less when reading Kafka.
+
+Session 6 batch twin: work/bronze.py (same catalog via work/lakehouse_spark.py).
+"""
+import os
+import sys
+
 from pyspark.sql import functions as F
 
-spark = SparkSession.builder \
-  .appName("CDC-Bronze") \
-  .config("spark.sql.catalog.lakehouse", "org.apache.iceberg.spark.SparkCatalog") \
-  .config("spark.sql.catalog.lakehouse.type", "rest") \
-  .config("spark.sql.catalog.lakehouse.uri", "http://iceberg-rest:8181") \
-  .config("spark.sql.catalog.lakehouse.io-impl", "org.apache.iceberg.aws.s3.S3FileIO") \
-  .config("spark.sql.catalog.lakehouse.s3.endpoint", "http://minio:9000") \
-  .config("spark.sql.catalog.lakehouse.s3.path-style-access", "true") \
-  .config("spark.sql.defaultCatalog", "lakehouse") \
-  .getOrCreate()
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "work"))
+from lakehouse_spark import new_session
+
+spark = new_session("CDC-Bronze")
 
 spark.sql("CREATE NAMESPACE IF NOT EXISTS lakehouse.cdc")
 
