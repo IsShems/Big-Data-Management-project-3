@@ -16,7 +16,11 @@ Your group's custom scenario is (or will be :-)) described in your repository's 
 | `produce.py` | Replays taxi parquet rows as JSON into the `taxi-trips` Kafka topic (same as Project 2) |
 | `seed.py` | Creates source tables in PostgreSQL and inserts initial data |
 | `simulate.py` | Continuously makes changes (INSERT, UPDATE, DELETE) to PostgreSQL, simulating a live OLTP workload |
-| `dags/` | Place your Airflow DAG file(s) here — auto-loaded by the Airflow scheduler |
+| `dags/` | Airflow DAGs — **`pipeline_dag.py`** only (`project3_pipeline`: Week 06 patterns + CDC/taxi Spark) |
+| `work/` | Session 6 Spark batch jobs: CDC bronze/silver + taxi bronze/silver (Iceberg REST catalog) |
+| `work/week_06_practice.ipynb` | Week 06 course practice (Airflow orchestration lab); migrated from the course `week06` folder — **use this repo’s `compose.yml` only** |
+| `gold_prototype.sql` | Session 6 Task 3 — prototype join for Project 3 Gold |
+| `cdc_bronze.py` | Interactive CDC bronze (same catalog as `work/bronze.py`) |
 | `REPORT.md` | Template for the report you need to hand in |
 | `.env.example` | Template for credentials — copy to `.env` and fill in values |
 | `data/` | **Not in git.** Place the same taxi parquet files from Project 1 & 2 here |
@@ -80,8 +84,7 @@ You should see these services running:
 | `minio` | S3-compatible object storage for Iceberg |
 | `minio_init` | One-shot bucket creation (exited is OK) |
 | `iceberg-rest` | Iceberg REST catalog |
-| `airflow-webserver` | Airflow UI |
-| `airflow-scheduler` | Airflow DAG scheduler |
+| `airflow` | Airflow standalone (UI + scheduler; Session 6 DAGs) |
 | `jupyter` | Jupyter + PySpark |
 
 ### 5. Seed the PostgreSQL source
@@ -128,6 +131,18 @@ source tables, simulating a live application.
 docker compose down          # keeps MinIO data (named volume)
 docker compose down -v       # also deletes stored Iceberg tables
 ```
+
+---
+
+## Week 06 practice (course lab, migrated here)
+
+The Week 06 materials from the course `week06` folder live in this repo as **`work/week_06_practice.ipynb`** — not as a second Compose project. Start **this** stack (`docker compose up -d`), open Jupyter at port **8888**, then run the notebook cells in order.
+
+**What the notebook does:** it teaches Airflow concepts (`HttpSensor`, retries, SLA, backfill, `BranchPythonOperator`) against the **same DAG you submit for Session 6:** **`project3_pipeline`** in `dags/pipeline_dag.py` (CDC uses Spark + Iceberg; the old JSON/PostgreSQL-only lab DAG is not used). Part 2 no longer writes a second DAG file — it documents the graph shipped in the repo.
+
+**Ports vs. the old standalone `week06` compose:** Airflow UI **8080** (not 8081), Kafka Connect **8083** (not 8084), Jupyter **8888** (not 8889). Credentials come from **`.env`** (`AIRFLOW_*`, `PG_*`, `JUPYTER_TOKEN`, `MINIO_ROOT_*`, `CDC_CONNECTOR_NAME`).
+
+**Learning outcomes** (from the course README): DAG anatomy; `HttpSensor`; task dependencies and branching; retries / SLA; REST API triggers; backfill and idempotency; connector failure recovery.
 
 ---
 
@@ -291,6 +306,29 @@ The grading process:
 
 ---
 
+## Session 6 (in-class) — what’s wired here
+
+1. **DAG** `project3_pipeline` in `dags/pipeline_dag.py`  
+   - **CDC branch:** `check_debezium_health` → `bronze_cdc` → `silver_cdc` (Kafka → `lakehouse.cdc.*` via `work/bronze.py` / `work/silver.py`).  
+   - **Taxi branch:** `bronze_taxi` → `silver_taxi` (parquet in `./data/` → `lakehouse.taxi.*` via `work/taxi_bronze.py` / `work/taxi_silver.py`).  
+   - Branches run **in parallel**; only CDC waits on the connector health check.
+
+2. **Debezium** must be **RUNNING** (register your connector; default name in DAG env is `pg-cdc-connector`, override with `CDC_CONNECTOR_NAME` in `.env`).
+
+3. **Airflow** runs Spark with `docker exec` into the `jupyter` container — the compose file mounts the Docker socket and installs the Docker CLI in the Airflow image.
+
+4. **Manual Spark** (inside Jupyter):  
+   `python work/bronze.py` → `python work/silver.py` → `python work/taxi_bronze.py` → `python work/taxi_silver.py`  
+   (same JARs as `PYSPARK_SUBMIT_ARGS`: Scala **2.12**, Spark **3.5.0**.)
+
+5. **Gold prototype:** run SQL in `gold_prototype.sql` after both Silver tables exist.
+
+6. **Moodle screenshots:** Graph view with both branches, green run, row counts  
+   `SELECT count(*) FROM lakehouse.cdc.silver_customers;`  
+   `SELECT count(*) FROM lakehouse.taxi.silver_trips;`
+
+---
+
 ## Troubleshooting
 
 **Debezium connector FAILED**
@@ -309,7 +347,7 @@ Check with: `SELECT slot_name, pg_size_pretty(pg_wal_lsn_diff(pg_current_wal_lsn
 
 **Airflow DAG not appearing**
 Place your DAG `.py` file in the `dags/` directory. The scheduler scans this folder.
-Check `docker compose logs airflow-scheduler` for import errors.
+Check `docker compose logs airflow` for import errors.
 
 **`Failed to find data source: kafka`**
 Check `PYSPARK_SUBMIT_ARGS` in `compose.yml` — versions must match your Spark version.

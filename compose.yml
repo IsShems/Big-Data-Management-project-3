@@ -131,9 +131,11 @@ services:
       - CATALOG_S3_PATH__STYLE__ACCESS=true
 
   # ── Airflow (webserver + scheduler in one container for simplicity) ──────────
+  # Session 6: DAG tasks run spark-submit inside Jupyter via docker exec (needs Docker socket).
   airflow:
     image: apache/airflow:2.10.5-python3.11
     container_name: airflow
+    user: root
     depends_on:
       kafka:
         condition: service_healthy
@@ -141,6 +143,8 @@ services:
         condition: service_healthy
       connect:
         condition: service_healthy
+      jupyter:
+        condition: service_started
     ports:
       - "8080:8080"
     environment:
@@ -149,7 +153,13 @@ services:
       - AIRFLOW__CORE__DAGS_FOLDER=/opt/airflow/dags
       - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=sqlite:////opt/airflow/airflow.db
       - AIRFLOW__WEBSERVER__EXPOSE_CONFIG=True
-      # Pass connection info so DAGs can reach other services
+      # REST API: allow notebook/scripts to use HTTP Basic Auth (same FAB user as the UI)
+      - AIRFLOW__API__AUTH_BACKENDS=airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session
+      # HttpSensor task health_check uses conn_id debezium_connect
+      - 'AIRFLOW_CONN_DEBEZIUM_CONNECT={"conn_type":"http","host":"connect","port":8083,"schema":"http"}'
+      # Used inside the entrypoint (must be real env vars in the container, not only compose substitution)
+      - AIRFLOW_USER=${AIRFLOW_USER:-admin}
+      - AIRFLOW_PASSWORD=${AIRFLOW_PASSWORD:-admin}
       - KAFKA_BOOTSTRAP=kafka:9092
       - CONNECT_URL=http://connect:8083
       - PG_HOST=postgres
@@ -157,31 +167,58 @@ services:
       - PG_DB=sourcedb
       - PG_USER=${PG_USER:-cdc_user}
       - PG_PASSWORD=${PG_PASSWORD:-cdc_pass}
+      - CDC_CONNECTOR_NAME=${CDC_CONNECTOR_NAME:-pg-cdc-connector}
+      - CDC_KAFKA_TOPIC=${CDC_KAFKA_TOPIC:-dbserver1.public.customers}
+      - JUPYTER_CONTAINER_NAME=${JUPYTER_CONTAINER_NAME:-jupyter}
     volumes:
       - ./dags:/opt/airflow/dags
       - airflow-data:/opt/airflow
-    entrypoint: >
-      /bin/bash -c "
-        airflow db migrate;
-        airflow users create
-          --username ${AIRFLOW_USER:-admin}
-          --password ${AIRFLOW_PASSWORD:-admin}
-          --firstname Admin
-          --lastname User
-          --role Admin
-          --email admin@example.com 2>/dev/null || true;
-        exec airflow standalone
-      "
+      - /var/run/docker.sock:/var/run/docker.sock
+    entrypoint:
+      - /bin/bash
+      - -c
+      - |
+        set -e
+        if ! command -v docker >/dev/null 2>&1; then
+          apt-get update -qq && apt-get install -y -qq docker.io >/dev/null
+        fi
+        # Docker CLI in DAG tasks runs as user `airflow`; socket must be usable (dev only).
+        chmod 666 /var/run/docker.sock 2>/dev/null || true
+        AF_USER="$${AIRFLOW_USER:-admin}"
+        AF_PASS="$${AIRFLOW_PASSWORD:-admin}"
+        AIRFLOW_BIN=/home/airflow/.local/bin/airflow
+        # Standalone web UI does not reliably bind :8080 when the main process is root — run Airflow as `airflow`.
+        runuser -u airflow -- "$${AIRFLOW_BIN}" db migrate
+        set +e
+        runuser -u airflow -- "$${AIRFLOW_BIN}" users create \
+          --username "$${AF_USER}" \
+          --password "$${AF_PASS}" \
+          --firstname Admin \
+          --lastname User \
+          --role Admin \
+          --email admin@example.com
+        EC=$$?
+        set -e
+        if [ "$$EC" -ne 0 ]; then
+          runuser -u airflow -- "$${AIRFLOW_BIN}" users reset-password \
+            --username "$${AF_USER}" --password "$${AF_PASS}"
+        fi
+        # Keep webserver in foreground so container health tracks API availability.
+        exec runuser -u airflow -- /bin/bash -lc "set -e; /home/airflow/.local/bin/airflow scheduler --daemon; exec /home/airflow/.local/bin/airflow webserver --port 8080"
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:8080/health || exit 1"]
       interval: 15s
       timeout: 10s
+      start_period: 90s
       retries: 10
 
   # ── Jupyter + PySpark ────────────────────────────────────────────────────────
   jupyter:
     image: quay.io/jupyter/pyspark-notebook:spark-3.5.0
     container_name: jupyter
+    # Root for one-shot chmod/chown on the bind mount; Airflow writes dags/*.json as another
+    # UID — without this, jovyan often gets PermissionError on Windows/macOS bind mounts.
+    user: root
     depends_on:
       - kafka
       - postgres
@@ -203,13 +240,30 @@ services:
       - PG_PASSWORD=${PG_PASSWORD:-cdc_pass}
       - KAFKA_BOOTSTRAP=kafka:9092
       - CONNECT_URL=http://connect:8083
-      - PYSPARK_SUBMIT_ARGS=--packages org.apache.spark:spark-sql-kafka-0-10_2.13:4.1.0,org.apache.iceberg:iceberg-spark-runtime-4.1_2.13:1.10.0,org.apache.iceberg:iceberg-aws-bundle:1.10.0 pyspark-shell
-    command: >
-      start-notebook.py
-      --ServerApp.token=${JUPYTER_TOKEN}
-      --ServerApp.password=''
-      --ServerApp.allow_origin='*'
-      --ServerApp.allow_remote_access=True
+      # For week_06_practice.ipynb Airflow REST API calls (must match Airflow FAB user)
+      - AIRFLOW_USER=${AIRFLOW_USER:-admin}
+      - AIRFLOW_PASSWORD=${AIRFLOW_PASSWORD:-admin}
+      - CDC_CONNECTOR_NAME=${CDC_CONNECTOR_NAME:-pg-cdc-connector}
+      - TAXI_DATA_PATH=/home/jovyan/project/data
+      - ICEBERG_REST_URI=http://iceberg-rest:8181
+      - S3_ENDPOINT=http://minio:9000
+      # Spark 3.5.0 in this image is built for Scala 2.12 (default bin-hadoop3). Use _2.12 artifacts;
+      # _2.13 Kafka/Iceberg jars cause NoClassDefFoundError: scala/$less$colon$less at runtime.
+      - PYSPARK_SUBMIT_ARGS=--packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0,org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.10.0,org.apache.iceberg:iceberg-aws-bundle:1.10.0 pyspark-shell
+    # Image ENTRYPOINT is `tini … start.sh`. start.sh already drops root → jovyan via sudo.
+    # Do NOT nest `runuser` inside that (it runs as jovyan and exits before the server starts).
+    entrypoint:
+      - /bin/bash
+      - -c
+      - |
+          mkdir -p /home/jovyan/project/dags
+          chmod -R 777 /home/jovyan/project 2>/dev/null || true
+          chown -R jovyan:users /home/jovyan/project 2>/dev/null || true
+          exec /usr/local/bin/start.sh start-notebook.py \
+            --ServerApp.token=${JUPYTER_TOKEN} \
+            --ServerApp.password='' \
+            --ServerApp.allow_origin='*' \
+            --ServerApp.allow_remote_access=True
 
 volumes:
   pg-data:
