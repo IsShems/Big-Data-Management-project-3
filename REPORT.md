@@ -13,7 +13,7 @@ Bronze stores raw Debezium envelope fields: `op`, `before.*`, `after.*`, `ts_ms`
 
 ### Schema
 
-**Bronze CDC** (customers example — drivers mirrors this with license/rating/city fields):
+**Bronze CDC** (customers example - drivers mirrors this with license/rating/city fields):
 
 | Column | Type | Description |
 |---|---|---|
@@ -29,7 +29,7 @@ Bronze stores raw Debezium envelope fields: `op`, `before.*`, `after.*`, `ts_ms`
 | after_country | string | Country after change |
 | before_id | int | Row id before change (for updates/deletes) |
 
-**Silver CDC** mirrors the current PostgreSQL source state — same columns as the source table (`id`, `name`, `email`, `country`, `created_at` for customers; `id`, `name`, `license_number`, `rating`, `city`, `active`, `created_at` for drivers), with one row per primary key.
+**Silver CDC** mirrors the current PostgreSQL source state - same columns as the source table (`id`, `name`, `email`, `country`, `created_at` for customers; `id`, `name`, `license_number`, `rating`, `city`, `active`, `created_at` for drivers), with one row per primary key.
 
 ### Correctness Checks
 
