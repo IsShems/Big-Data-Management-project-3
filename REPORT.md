@@ -362,6 +362,8 @@ AIRFLOW_PASSWORD=admin
 - [x] Taxi Bronze / Silver / Gold implemented and orchestrated
 - [x] Airflow DAG graph and run history captured (≥3 successful runs)
 - [x] Iceberg snapshot history and time travel demonstrated
+- [x] Custom scenario queries implemented with output shown in report
+- [x] Driver tip report non-empty after Silver drivers recovery flow
 
 ---
 
@@ -371,5 +373,3 @@ AI assistance (Claude) was used in this project for:
 - Editing the written report 
 - Helping with fixing Spark/Iceberg/Kafka configuration errors
 
-- [x] Custom scenario queries implemented with output shown in report
-- [x] Driver tip report non-empty after Silver drivers recovery flow
